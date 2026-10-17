@@ -18,8 +18,11 @@ Work this way:
 3. **Write the answer** in this shape:
    - **The short answer:** two or three sentences that answer directly.
    - **From your notes:** the explanation, built only from what the notes
-     say. Put a citation after every claim, copied exactly as `search`
-     printed it: `[[slug#Heading]]`. Mark quotes with quotation marks and
+     say. Cite with the exact form `search` printed: `[[slug#Heading]]`.
+     Cite a source once, at the end of the sentences it supports, not
+     after each one: when several sentences in a row come from the same
+     section, put one citation after the last of them. Cite again only when
+     the source changes, and always right after a direct quote. Mark quotes with quotation marks and
      copy them word for word; everything else is paraphrase and must stay
      faithful to the note. When notes disagree or a note marks something as
      uncertain, say so.
