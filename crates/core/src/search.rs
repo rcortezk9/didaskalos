@@ -1,9 +1,11 @@
-//! Retrieval: keyword search, layer boost, then a boost for notes your
-//! own links tie to the top results.
+//! Retrieval: keyword search and meaning search merged, then a layer
+//! boost, then a boost for notes your own links tie to the top results.
 //!
-//! Analogy: FTS5 is the card catalogue (exact words), the layer boost is
-//! shelving the encyclopedia above the raw transcripts, and the link boost
-//! is following the "see also" notes you wrote in the margins.
+//! Analogy: FTS5 is the card catalogue (exact words), the vectors are a
+//! well-read friend who knows what you mean, the merge asks both for a
+//! shortlist and favours what both name, the layer boost is shelving the
+//! encyclopedia above the raw transcripts, and the link boost is following
+//! the "see also" notes you wrote in the margins.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,6 +22,12 @@ const CANDIDATE_CHUNKS: usize = 1000;
 const LINK_SEEDS: usize = 5;
 /// Share of a seed note's score a linked note gains.
 const LINK_BOOST: f64 = 0.2;
+/// How many chunks the meaning pass keeps (top by cosine).
+const VECTOR_CANDIDATES: usize = 300;
+/// Reciprocal rank fusion constant: how fast a list's credit fades with rank.
+const RRF_K: f64 = 60.0;
+/// Brings fused scores (about 0.03) to the size keyword scores had.
+const RRF_SCALE: f64 = 1000.0;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HitChunk {
@@ -131,6 +139,105 @@ fn coverage(terms: &[String], weights: &[f64], text: &str) -> f64 {
     found / total
 }
 
+/// Where a chunk lives, for building a hit from it.
+struct ChunkInfo {
+    note_id: i64,
+    slug: String,
+    title: String,
+    kind: String,
+    path: String,
+    heading: String,
+    heading_path: String,
+}
+
+/// Reciprocal rank fusion: each ranked list gives a chunk 1/(k + rank),
+/// and the credits add. A chunk both lists name beats one only a single
+/// list ranks first. Returns (id, fused score), best first.
+pub fn rrf_merge(lists: &[&[i64]], k: f64) -> Vec<(i64, f64)> {
+    let mut score: HashMap<i64, f64> = HashMap::new();
+    for list in lists {
+        for (rank, id) in list.iter().enumerate() {
+            *score.entry(*id).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
+        }
+    }
+    let mut out: Vec<(i64, f64)> = score.into_iter().collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    out
+}
+
+/// The chunks closest in meaning to the question, best first. Empty when
+/// the feature is off, no vectors are stored, or the model cannot load,
+/// which leaves search keyword-only.
+#[cfg(feature = "embed")]
+fn vector_candidates(conn: &Connection, query: &str) -> Result<Vec<(i64, f32)>> {
+    use crate::embed;
+    let any: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM chunk_vec)", [], |r| r.get(0))?;
+    if !any {
+        return Ok(vec![]);
+    }
+    let q = match embed::Embedder::new(false).and_then(|mut m| m.query(query)) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("(meaning search off: {e}; using keywords only)");
+            return Ok(vec![]);
+        }
+    };
+    let mut stmt = conn.prepare_cached("SELECT chunk_id, vec FROM chunk_vec")?;
+    let mut scored: Vec<(i64, f32)> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+        .filter_map(|r| r.ok())
+        .filter(|(_, b)| b.len() == embed::DIMS * 4)
+        .map(|(id, b)| (id, embed::dot(&q, &embed::from_blob(&b))))
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.truncate(VECTOR_CANDIDATES);
+    Ok(scored)
+}
+
+#[cfg(not(feature = "embed"))]
+fn vector_candidates(_conn: &Connection, _query: &str) -> Result<Vec<(i64, f32)>> {
+    Ok(vec![])
+}
+
+fn load_chunks(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, ChunkInfo, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT n.id, n.slug, n.title, n.kind, n.path, c.heading, c.heading_path, c.text
+         FROM chunks c JOIN notes n ON n.id = c.note_id WHERE c.id = ?1",
+    )?;
+    let mut out = Vec::new();
+    for id in ids {
+        let row = stmt.query_row([id], |r| {
+            Ok((
+                ChunkInfo {
+                    note_id: r.get(0)?,
+                    slug: r.get(1)?,
+                    title: r.get(2)?,
+                    kind: r.get(3)?,
+                    path: r.get(4)?,
+                    heading: r.get(5)?,
+                    heading_path: r.get(6)?,
+                },
+                r.get::<_, String>(7)?,
+            ))
+        });
+        if let Ok((info, text)) = row {
+            out.push((*id, info, text));
+        }
+    }
+    Ok(out)
+}
+
+/// The opening of a section, for hits found by meaning (no matched words
+/// to highlight).
+fn snippet_of(text: &str) -> String {
+    let t = tidy(text);
+    if t.chars().count() <= 200 {
+        t
+    } else {
+        format!("{} …", t.chars().take(200).collect::<String>().trim_end())
+    }
+}
+
 struct Candidate {
     note_id: i64,
     slug: String,
@@ -158,7 +265,7 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Results> {
     let mut stmt = conn.prepare_cached(
         "SELECT n.id, n.slug, n.title, n.kind, n.path, c.heading, c.heading_path, c.text,
                 bm25(chunks_fts, 4.0, 2.0, 1.0) AS rank,
-                snippet(chunks_fts, 2, '«', '»', ' … ', 28)
+                snippet(chunks_fts, 2, '«', '»', ' … ', 28), c.id
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.rowid
          JOIN notes n ON n.id = c.note_id
@@ -166,42 +273,67 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Results> {
          ORDER BY rank
          LIMIT ?2",
     )?;
-    let mut by_note: HashMap<i64, Candidate> = HashMap::new();
     let rows = stmt.query_map(rusqlite::params![fts_query(&terms), CANDIDATE_CHUNKS as i64], |r| {
         Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, String>(5)?,
-            r.get::<_, String>(6)?,
+            ChunkInfo {
+                note_id: r.get(0)?,
+                slug: r.get(1)?,
+                title: r.get(2)?,
+                kind: r.get(3)?,
+                path: r.get(4)?,
+                heading: r.get(5)?,
+                heading_path: r.get(6)?,
+            },
             r.get::<_, String>(7)?,
             r.get::<_, f64>(8)?,
             r.get::<_, String>(9)?,
+            r.get::<_, i64>(10)?,
         ))
     })?;
+    // chunk id -> (where it is, snippet)
+    let mut chunks: HashMap<i64, (ChunkInfo, String)> = HashMap::new();
+    let mut kw_scored: Vec<(i64, f64)> = Vec::new();
     for row in rows {
-        let (note_id, slug, title, kind, path, heading, heading_path, text, rank, snippet) = row?;
-        // bm25 is negative-is-better; flip it, then weight by vault layer
-        // and by how many of the question's words the chunk contains.
-        let full = format!("{title} {heading_path} {text}");
+        let (info, text, rank, snippet, chunk_id) = row?;
+        // bm25 is negative-is-better; flip it, then weight by how many of
+        // the question's words the chunk contains and how many sit in pairs.
+        let full = format!("{} {} {}", info.title, info.heading_path, text);
         let cov = coverage(&terms, &weights, &full);
-        let score = -rank
-            * Kind::from_str(&kind).boost()
-            * section_weight(&heading)
-            * hub_weight(&slug)
-            * (0.25 + 0.75 * cov * cov)
-            * (1.0 + phrase_share(&terms, &weights, &full));
-        let cand = by_note.entry(note_id).or_insert_with(|| Candidate {
-            note_id,
-            slug,
-            title,
-            kind,
-            path,
+        let base = -rank * (0.25 + 0.75 * cov * cov) * (1.0 + phrase_share(&terms, &weights, &full));
+        kw_scored.push((chunk_id, base));
+        chunks.insert(chunk_id, (info, tidy(&snippet)));
+    }
+    kw_scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    // 1b. Meaning pass: nearest chunks by cosine, when vectors exist.
+    //     With none, the keyword score stands alone, as before.
+    let vec_hits = vector_candidates(conn, query)?;
+    let chunk_score: Vec<(i64, f64)> = if vec_hits.is_empty() {
+        kw_scored
+    } else {
+        let kw_ids: Vec<i64> = kw_scored.iter().map(|(id, _)| *id).collect();
+        let vec_ids: Vec<i64> = vec_hits.iter().map(|(id, _)| *id).collect();
+        let missing: Vec<i64> = vec_ids.iter().copied().filter(|id| !chunks.contains_key(id)).collect();
+        for (id, info, text) in load_chunks(conn, &missing)? {
+            chunks.insert(id, (info, snippet_of(&text)));
+        }
+        rrf_merge(&[&kw_ids, &vec_ids], RRF_K).into_iter().map(|(id, s)| (id, s * RRF_SCALE)).collect()
+    };
+
+    // Layer, section and hub weights apply to whichever score we have.
+    let mut by_note: HashMap<i64, Candidate> = HashMap::new();
+    for (chunk_id, base) in chunk_score {
+        let Some((info, snippet)) = chunks.remove(&chunk_id) else { continue };
+        let score = base * Kind::from_str(&info.kind).boost() * section_weight(&info.heading) * hub_weight(&info.slug);
+        let cand = by_note.entry(info.note_id).or_insert_with(|| Candidate {
+            note_id: info.note_id,
+            slug: info.slug,
+            title: info.title,
+            kind: info.kind,
+            path: info.path,
             chunks: Vec::new(),
         });
-        cand.chunks.push(HitChunk { heading, heading_path, snippet: tidy(&snippet), score });
+        cand.chunks.push(HitChunk { heading: info.heading, heading_path: info.heading_path, snippet, score });
     }
 
     // 2. Note score: best chunk, plus a little for a second and third
@@ -339,6 +471,21 @@ mod tests {
         let t = query::words("one true church");
         let w = vec![1.0; t.len()];
         assert_eq!(phrase_share(&t, &w, "Orthodoxy IS the TRUE CHURCH"), 0.5);
+    }
+
+    #[test]
+    fn rrf_rewards_chunks_both_lists_name() {
+        // 7 is second in both lists; 1 and 9 each top only one list.
+        let merged = rrf_merge(&[&[1, 7, 2], &[9, 7, 3]], 60.0);
+        let ids: Vec<i64> = merged.iter().map(|m| m.0).collect();
+        assert_eq!(ids, vec![7, 1, 9, 2, 3]);
+        assert!((merged[0].1 - 2.0 / 62.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rrf_with_one_list_keeps_its_order() {
+        let ids: Vec<i64> = rrf_merge(&[&[5, 4, 3]], 60.0).into_iter().map(|m| m.0).collect();
+        assert_eq!(ids, vec![5, 4, 3]);
     }
 
     #[test]

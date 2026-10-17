@@ -8,8 +8,13 @@ name = "dsk"
 path = "src/main.rs"
 
 [dependencies]
-didaskalos-core = { path = "../core" }
+didaskalos-core = { path = "../core", default-features = false }
 anyhow        = { workspace = true }
 clap          = { workspace = true }
 clap_complete = { workspace = true }
 serde_json    = { workspace = true }
+rusqlite      = { workspace = true }
+
+[features]
+default = ["embed"]
+embed = ["didaskalos-core/embed"]

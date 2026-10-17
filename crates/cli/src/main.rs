@@ -93,6 +93,7 @@ fn main() -> Result<()> {
                 r.scanned, r.added, r.updated, r.removed, r.unchanged, r.chunks,
                 t.elapsed().as_secs_f64()
             );
+            embed_vectors(&mut conn)?;
         }
         Cmd::Search { query, limit, json } => {
             let q = query.join(" ");
@@ -116,6 +117,23 @@ fn main() -> Result<()> {
         }
         Cmd::Completions { .. } => unreachable!(),
     }
+    Ok(())
+}
+
+#[cfg(feature = "embed")]
+fn embed_vectors(conn: &mut rusqlite::Connection) -> Result<()> {
+    let t = Instant::now();
+    let n = index::embed_missing(conn, |done, total| {
+        eprint!("\rembedding chunks: {done}/{total}");
+    })?;
+    if n > 0 {
+        eprintln!("\rembedded {n} chunks in {:.0}s{:20}", t.elapsed().as_secs_f64(), "");
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "embed"))]
+fn embed_vectors(_conn: &mut rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 

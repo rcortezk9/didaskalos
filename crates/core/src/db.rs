@@ -7,7 +7,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bump when the schema changes; `open` then rebuilds from scratch.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub fn default_db_path() -> PathBuf {
     let data_home = std::env::var("XDG_DATA_HOME")
@@ -36,7 +36,9 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// Drop everything and create the current schema.
 fn reset(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!(
-        "DROP TABLE IF EXISTS chunks_fts;
+        "DROP TABLE IF EXISTS chunks_vocab;
+         DROP TABLE IF EXISTS chunk_vec;
+         DROP TABLE IF EXISTS chunks_fts;
          DROP TABLE IF EXISTS links;
          DROP TABLE IF EXISTS chunks;
          DROP TABLE IF EXISTS notes;
@@ -63,6 +65,13 @@ fn reset(conn: &Connection) -> Result<()> {
              text         TEXT NOT NULL
          );
          CREATE INDEX chunks_note ON chunks(note_id);
+
+         -- One unit-length f32 vector (384 little-endian floats) per chunk,
+         -- for meaning search. Missing rows just mean keyword-only for that chunk.
+         CREATE TABLE chunk_vec (
+             chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+             vec      BLOB NOT NULL
+         );
 
          -- Keyword index. rowid = chunks.id. Porter stemming so
          -- 'inherited' matches 'inheritance'; diacritics folded for Greek.

@@ -34,7 +34,7 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
 pub fn update(conn: &mut Connection, vault: &Path, full: bool) -> Result<Report> {
     let mut report = Report::default();
     if full {
-        conn.execute_batch("DELETE FROM chunks_fts; DELETE FROM links; DELETE FROM chunks; DELETE FROM notes;")?;
+        conn.execute_batch("DELETE FROM chunk_vec; DELETE FROM chunks_fts; DELETE FROM links; DELETE FROM chunks; DELETE FROM notes;")?;
     }
 
     // path -> (id, hash) for what is already indexed.
@@ -175,4 +175,46 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
         )?,
         by_kind,
     })
+}
+
+/// Embed every chunk that has no vector yet (new or changed notes), in
+/// batches, and store them. Returns how many were embedded. `progress`
+/// gets (done, total) after each batch.
+#[cfg(feature = "embed")]
+pub fn embed_missing(conn: &mut Connection, mut progress: impl FnMut(usize, usize)) -> Result<usize> {
+    use crate::embed::{self, Embedder};
+
+    let todo: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.heading_path, c.text FROM chunks c
+             LEFT JOIN chunk_vec v ON v.chunk_id = c.id
+             WHERE v.chunk_id IS NULL ORDER BY c.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, embed::chunk_input(&r.get::<_, String>(1)?, &r.get::<_, String>(2)?)))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if todo.is_empty() {
+        return Ok(0);
+    }
+
+    let mut model = Embedder::new(true)?;
+    let total = todo.len();
+    let mut done = 0;
+    for batch in todo.chunks(64) {
+        let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+        let vecs = model.passages(&texts)?;
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("INSERT OR REPLACE INTO chunk_vec (chunk_id, vec) VALUES (?1, ?2)")?;
+            for ((id, _), v) in batch.iter().zip(&vecs) {
+                stmt.execute(params![id, embed::to_blob(v)])?;
+            }
+        }
+        tx.commit()?;
+        done += batch.len();
+        progress(done, total);
+    }
+    Ok(done)
 }

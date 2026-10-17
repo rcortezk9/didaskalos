@@ -50,12 +50,23 @@ The index lives at `~/.local/share/didaskalos/index.db` (override with
    share of their score, and linked notes the words missed are listed
    under "Linked from these results".
 
-Meaning-based (embedding) search is the next step; see the design doc.
+5. **Meaning.** `dsk index` also embeds every section with a small local
+   model (BGE small English, 384 numbers per section, on the CPU). At
+   search time the 300 sections closest in meaning to the question are
+   merged with the keyword list by reciprocal rank fusion (k=60), then the
+   layer, section, hub, title and link weights above apply. Questions that
+   share no words with the right note ("how is Orthodoxy different") can
+   now find it. The first `dsk index` downloads the model into
+   `~/.cache/didaskalos` and embeds the whole vault (about 25 minutes on
+   10 cores); later runs embed only new or changed notes.
+
+   Build with `--no-default-features` to leave this out. Keyword search
+   also works alone if the vectors or the model are missing.
 
 ## Layout
 
 ```
-crates/core   parsing (note.rs), schema (db.rs), indexing (index.rs), ranking (search.rs)
+crates/core   parsing (note.rs), schema (db.rs), indexing (index.rs), embeddings (embed.rs), ranking (search.rs)
 crates/cli    the `dsk` binary
 ```
 

@@ -16,6 +16,7 @@ clap_complete = "4"
 walkdir    = "2"
 regex      = "1"
 blake3     = "1"
+fastembed  = "7.1.1"
 
 [profile.release]
 strip = true
