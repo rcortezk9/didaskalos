@@ -628,6 +628,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "didaskalos-core",
+ "regex",
  "rusqlite",
  "serde_json",
 ]

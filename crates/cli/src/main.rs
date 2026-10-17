@@ -3,6 +3,7 @@
 //!   dsk index            bring the index up to date (only changed notes)
 //!   dsk search "query"   ranked notes with the sections that matched
 //!   dsk stats            what the index holds
+//!   dsk mcp              serve the vault to Claude Code (MCP over stdio)
 //!   dsk completions fish > ~/.config/fish/completions/dsk.fish
 
 use std::io::Write;
@@ -12,6 +13,8 @@ use std::time::Instant;
 use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use didaskalos_core::{db, index, search};
+
+mod mcp;
 
 #[derive(Parser)]
 #[command(name = "dsk", version, about = "Study your theology vault from the terminal")]
@@ -49,6 +52,9 @@ enum Cmd {
     },
     /// Show what the index holds.
     Stats,
+    /// Serve the vault to Claude Code as MCP tools over stdin/stdout.
+    /// Register with: claude mcp add didaskalos -- dsk mcp
+    Mcp,
     /// Print shell completions, e.g. `dsk completions fish`.
     Completions { shell: clap_complete::Shell },
 }
@@ -114,6 +120,14 @@ fn main() -> Result<()> {
             for (kind, n) in s.by_kind {
                 println!("  {kind:14} {n}");
             }
+        }
+        Cmd::Mcp => {
+            let vault = vault_path(&cli);
+            if !vault.is_dir() {
+                bail!("vault folder not found: {} (set --vault or $DSK_VAULT)", vault.display());
+            }
+            mcp::refresh(&mut conn, &vault)?;
+            mcp::Server::new(conn, vault).run()?;
         }
         Cmd::Completions { .. } => unreachable!(),
     }

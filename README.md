@@ -1,13 +1,12 @@
 # didaskalos
 
-A study companion for an Obsidian theology vault. Phase 1 is the
-retrieval core: it indexes the vault into one SQLite file and answers
-searches with the notes and sections that matter, cited as
-`[[note#Heading]]` links Obsidian opens.
+A study companion for an Obsidian theology vault. It indexes the vault
+into one SQLite file, answers searches with the notes and sections that
+matter, cited as `[[note#Heading]]` links Obsidian opens, and serves
+those notes to Claude Code so it can answer questions from them (`/ask`).
 
-Later phases put an MCP server on top so Claude Code can answer
-questions, build lessons, quiz you and coach apologetics from your notes.
-The design doc lives in the project.
+Later phases add lessons, spaced-repetition review and apologetics
+coaching on the same server. The design doc lives in the project.
 
 ## Install
 
@@ -29,6 +28,37 @@ dsk stats
 The index lives at `~/.local/share/didaskalos/index.db` (override with
 `--db` or `$DSK_DB`). It is a cache: delete it any time and run
 `dsk index` again.
+
+## Use it from Claude Code
+
+`dsk mcp` serves the vault to Claude Code as tools (MCP over stdio).
+Register it once for every project, and link the slash commands into
+your user commands so they work from any folder:
+
+```fish
+claude mcp add --scope user didaskalos -- dsk mcp --vault ~/Documents/Notes/Theology
+mkdir -p ~/.claude/commands
+ln -sf (pwd)/.claude/commands/ask.md ~/.claude/commands/ask.md
+```
+
+Then in Claude Code: `/ask why don't the Orthodox hold to sola scriptura`.
+The answer cites sections as `[[slug#Heading]]`, separates what your
+notes say from anything added under "Beyond your notes", and is checked
+so every citation points at a real note and heading.
+
+The server's tools:
+
+| Tool | What it gives Claude |
+|------|----------------------|
+| `search` | Best notes with the full text of their best sections, each headed by its citation |
+| `read_note` | A whole note, or one section by heading |
+| `neighbors` | What a note links to and what links to it |
+| `lessons` | Rows of `lessons_index.md`, filterable by words |
+| `check_citations` | Which `[[...]]` links in a draft point at missing notes or headings |
+
+On start it brings the keyword index up to date, so notes written since
+the last `dsk index` are searchable at once; run `dsk index` for their
+vectors.
 
 ## How search ranks
 
@@ -67,7 +97,8 @@ The index lives at `~/.local/share/didaskalos/index.db` (override with
 
 ```
 crates/core   parsing (note.rs), schema (db.rs), indexing (index.rs), embeddings (embed.rs), ranking (search.rs)
-crates/cli    the `dsk` binary
+crates/cli    the `dsk` binary and the MCP server (mcp.rs)
+.claude/commands   slash commands for Claude Code (/ask)
 ```
 
 Run the tests with `cargo test`.

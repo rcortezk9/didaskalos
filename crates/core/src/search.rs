@@ -23,6 +23,7 @@ const LINK_SEEDS: usize = 5;
 /// Share of a seed note's score a linked note gains.
 const LINK_BOOST: f64 = 0.2;
 /// How many chunks the meaning pass keeps (top by cosine).
+#[cfg(feature = "embed")]
 const VECTOR_CANDIDATES: usize = 300;
 /// Reciprocal rank fusion constant: how fast a list's credit fades with rank.
 const RRF_K: f64 = 60.0;
@@ -175,7 +176,19 @@ fn vector_candidates(conn: &Connection, query: &str) -> Result<Vec<(i64, f32)>> 
     if !any {
         return Ok(vec![]);
     }
-    let q = match embed::Embedder::new(false).and_then(|mut m| m.query(query)) {
+    // Loading the model takes a moment, so a long-running process (the
+    // MCP server) keeps it after the first question.
+    thread_local! {
+        static MODEL: std::cell::RefCell<Option<embed::Embedder>> = const { std::cell::RefCell::new(None) };
+    }
+    let q = MODEL.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(embed::Embedder::new(false)?);
+        }
+        slot.as_mut().expect("model loaded above").query(query)
+    });
+    let q = match q {
         Ok(q) => q,
         Err(e) => {
             eprintln!("(meaning search off: {e}; using keywords only)");
