@@ -3,7 +3,10 @@
 Run this from `~/Projects/didaskalos` with `claude "Do the task in docs/phase2_mcp_local_test.md"`.
 
 1. `git pull`, then `cargo install --path crates/cli` (with the default
-   `embed` feature, so search uses the vectors already built).
+   `embed` feature, so search uses the vectors already built). The
+   model cache in `vector_candidates` (crates/core/src/search.rs) could
+   only be built without `embed` in the cloud; if it fails to compile,
+   fix it there, run `cargo test`, and commit the fix.
 2. Register the server and the command:
    ```fish
    claude mcp add --scope user didaskalos -- dsk mcp --vault /home/recocortez/Documents/Notes/Theology
