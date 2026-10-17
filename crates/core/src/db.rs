@@ -7,7 +7,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bump when the schema changes; `open` then rebuilds from scratch.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub fn default_db_path() -> PathBuf {
     let data_home = std::env::var("XDG_DATA_HOME")
@@ -70,6 +70,9 @@ fn reset(conn: &Connection) -> Result<()> {
              title, heading, body,
              tokenize = 'porter unicode61 remove_diacritics 2'
          );
+
+         -- Every indexed word with its document count, for spelling fixes.
+         CREATE VIRTUAL TABLE chunks_vocab USING fts5vocab(chunks_fts, 'row');
 
          CREATE TABLE links (
              src_id  INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,

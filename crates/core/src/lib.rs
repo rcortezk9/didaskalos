@@ -7,4 +7,5 @@
 pub mod db;
 pub mod index;
 pub mod note;
+pub mod query;
 pub mod search;

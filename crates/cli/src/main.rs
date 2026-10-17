@@ -121,6 +121,9 @@ fn main() -> Result<()> {
 
 fn print_results(res: &search::Results) -> Result<()> {
     let mut out = std::io::stdout().lock();
+    if !res.corrections.is_empty() {
+        writeln!(out, "(searched with {})\n", res.corrections.join(", "))?;
+    }
     if res.hits.is_empty() {
         writeln!(out, "No matches for \"{}\".", res.query)?;
         return Ok(());

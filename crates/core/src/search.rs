@@ -12,20 +12,14 @@ use rusqlite::{params_from_iter, Connection};
 use serde::Serialize;
 
 use crate::note::Kind;
+use crate::query;
 
 /// How many chunks the keyword pass pulls before ranking notes.
-const CANDIDATE_CHUNKS: usize = 300;
+const CANDIDATE_CHUNKS: usize = 1000;
 /// How many top notes seed the link boost.
 const LINK_SEEDS: usize = 5;
 /// Share of a seed note's score a linked note gains.
 const LINK_BOOST: f64 = 0.2;
-
-const STOPWORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "did", "do", "does", "for", "from",
-    "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "not", "of", "on", "or", "so",
-    "that", "the", "their", "them", "there", "these", "they", "this", "to", "was", "we", "were",
-    "what", "when", "where", "which", "who", "whom", "why", "will", "with", "would", "you", "your",
-];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HitChunk {
@@ -74,40 +68,67 @@ pub struct Results {
     /// Notes your links tie to the top results that the words alone
     /// did not find. Useful reading for a full lesson.
     pub related: Vec<Related>,
+    /// Abbreviations expanded and spellings corrected, e.g. "psa → ...".
+    pub corrections: Vec<String>,
 }
 
-/// Lowercase word terms with stopwords removed.
-pub fn terms(query: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    query
-        .split(|c: char| !c.is_alphanumeric())
-        .map(|t| t.to_lowercase())
-        .filter(|t| t.chars().count() >= 2 && !STOPWORDS.contains(&t.as_str()))
-        .filter(|t| seen.insert(t.clone()))
-        .collect()
-}
-
-/// `"theosis" OR "energies"`. Quoting each term keeps FTS5 syntax
-/// characters in the user's text from being parsed as operators.
+/// `"theosis"* OR "energies"*`. Quoting each term keeps FTS5 syntax
+/// characters in the user's text from being parsed as operators. Terms of
+/// four letters or more match as prefixes, so "orthodox" also finds
+/// "orthodoxy" (which the stemmer keeps apart).
 fn fts_query(terms: &[String]) -> String {
-    terms.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(" OR ")
+    terms
+        .iter()
+        .map(|t| if t.chars().count() >= 4 { format!("\"{t}\"*") } else { format!("\"{t}\"") })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
-/// Fraction of query terms that appear in the chunk. A rough stem match
-/// (first 5 letters) so "inherited" counts "inheritance".
-fn coverage(terms: &[String], text: &str) -> f64 {
-    if terms.is_empty() {
+fn stem5(t: &str) -> String {
+    t.chars().take(5).collect()
+}
+
+/// How many neighbouring query words also sit side by side in the text
+/// ("true church", "sola scriptura", "ancestral sin"), as a share of the
+/// query's pairs, each pair weighted by how rare its words are.
+fn phrase_share(terms: &[String], weights: &[f64], text: &str) -> f64 {
+    if terms.len() < 2 {
+        return 0.0;
+    }
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+    let mut total = 0.0;
+    let mut found = 0.0;
+    for i in 0..terms.len() - 1 {
+        let (a, b) = (stem5(&terms[i]), stem5(&terms[i + 1]));
+        let w = weights[i] + weights[i + 1];
+        total += w;
+        if words.windows(2).any(|p| p[0].starts_with(a.as_str()) && p[1].starts_with(b.as_str())) {
+            found += w;
+        }
+    }
+    if total > 0.0 { found / total } else { 0.0 }
+}
+
+/// Share of the query's terms that appear in the text, weighted by
+/// rarity so "true" counts for more than "orthodox" in this vault.
+/// A rough stem match (first 5 letters) so "inherited" counts "inheritance".
+fn coverage(terms: &[String], weights: &[f64], text: &str) -> f64 {
+    let total: f64 = weights.iter().sum();
+    if terms.is_empty() || total <= 0.0 {
         return 1.0;
     }
     let lower = text.to_lowercase();
-    let hits = terms
+    let found: f64 = terms
         .iter()
-        .filter(|t| {
-            let stem: String = t.chars().take(5).collect();
-            lower.contains(&stem)
-        })
-        .count();
-    hits as f64 / terms.len() as f64
+        .zip(weights)
+        .filter(|(t, _)| lower.contains(&stem5(t)))
+        .map(|(_, w)| w)
+        .sum();
+    found / total
 }
 
 struct Candidate {
@@ -120,8 +141,15 @@ struct Candidate {
 }
 
 pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Results> {
-    let terms = terms(query);
-    let empty = Results { query: query.to_string(), hits: vec![], related: vec![] };
+    let parsed = query::parse(conn, query)?;
+    let terms = parsed.terms;
+    let weights = parsed.weights;
+    let empty = Results {
+        query: query.to_string(),
+        hits: vec![],
+        related: vec![],
+        corrections: parsed.notes.clone(),
+    };
     if terms.is_empty() {
         return Ok(empty);
     }
@@ -157,11 +185,14 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Results> {
         let (note_id, slug, title, kind, path, heading, heading_path, text, rank, snippet) = row?;
         // bm25 is negative-is-better; flip it, then weight by vault layer
         // and by how many of the question's words the chunk contains.
-        let cov = coverage(&terms, &format!("{title} {heading_path} {text}"));
+        let full = format!("{title} {heading_path} {text}");
+        let cov = coverage(&terms, &weights, &full);
         let score = -rank
             * Kind::from_str(&kind).boost()
             * section_weight(&heading)
-            * (0.25 + 0.75 * cov * cov);
+            * hub_weight(&slug)
+            * (0.25 + 0.75 * cov * cov)
+            * (1.0 + phrase_share(&terms, &weights, &full));
         let cand = by_note.entry(note_id).or_insert_with(|| Candidate {
             note_id,
             slug,
@@ -183,7 +214,11 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Results> {
             let score = s.first().copied().unwrap_or(0.0)
                 + 0.25 * s.get(1).copied().unwrap_or(0.0)
                 + 0.1 * s.get(2).copied().unwrap_or(0.0);
-            (c, score)
+            // A note whose title names the question's subject is usually
+            // the one to read first ("Orthodoxy IS the TRUE CHURCH").
+            let title_cov = coverage(&terms, &weights, &c.title);
+            let title_phrase = phrase_share(&terms, &weights, &c.title);
+            (c, score * (1.0 + 0.6 * title_cov + 0.6 * title_phrase))
         })
         .collect();
     hits.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -239,7 +274,7 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Results> {
     related.sort_by(|a, b| b.links.cmp(&a.links).then(a.title.cmp(&b.title)));
     related.truncate(8);
 
-    Ok(Results { query: query.to_string(), hits, related })
+    Ok(Results { query: query.to_string(), hits, related, corrections: parsed.notes })
 }
 
 struct Neighbours {
@@ -278,6 +313,12 @@ fn neighbours_of(conn: &Connection, seeds: &[(i64, String, String, f64)]) -> Res
 
 /// Link lists ("Cross-References", "Related") repeat other notes' slugs,
 /// so they match on words without saying anything about them.
+fn hub_weight(slug: &str) -> f64 {
+    // Indexes and the ingest log mention every topic in passing.
+    let s = slug.rsplit('/').next().unwrap_or(slug);
+    if matches!(s, "index" | "log" | "lessons_index") { 0.3 } else { 1.0 }
+}
+
 fn section_weight(heading: &str) -> f64 {
     let h = heading.to_lowercase();
     let link_list = ["cross-references", "cross references", "related", "source", "sources", "source analyses", "see also"];
@@ -294,19 +335,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terms_drop_stopwords_and_punctuation() {
-        assert_eq!(terms("Is Adam's guilt inherited?"), vec!["adam", "guilt", "inherited"]);
+    fn phrase_share_finds_adjacent_pairs() {
+        let t = query::words("one true church");
+        let w = vec![1.0; t.len()];
+        assert_eq!(phrase_share(&t, &w, "Orthodoxy IS the TRUE CHURCH"), 0.5);
     }
 
     #[test]
     fn fts_query_quotes_terms() {
-        assert_eq!(fts_query(&["sola".into(), "scriptura".into()]), "\"sola\" OR \"scriptura\"");
+        assert_eq!(fts_query(&["sola".into(), "sin".into()]), "\"sola\"* OR \"sin\"");
     }
 
     #[test]
     fn coverage_counts_stems() {
-        let t = terms("inherited guilt");
-        assert_eq!(coverage(&t, "the inheritance of guilt"), 1.0);
-        assert_eq!(coverage(&t, "guilt alone"), 0.5);
+        let t = query::words("inherited guilt");
+        let w = vec![1.0; t.len()];
+        assert_eq!(coverage(&t, &w, "the inheritance of guilt"), 1.0);
+        assert_eq!(coverage(&t, &w, "guilt alone"), 0.5);
     }
 }

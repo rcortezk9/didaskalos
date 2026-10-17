@@ -34,10 +34,17 @@ The index lives at `~/.local/share/didaskalos/index.db` (override with
 
 1. **Keywords.** SQLite FTS5 with Porter stemming over every heading
    section ("chunk"), weighting the note title and heading above the body.
-2. **Coverage.** Sections containing more of the question's words rank higher.
+   Terms of four letters or more match as prefixes ("orthodox" finds
+   "orthodoxy"), known abbreviations expand (PSA → penal substitutionary
+   atonement), and misspellings are corrected against the vault's own
+   words (Anthanasius → Athanasius).
+2. **Coverage and phrases.** Sections containing more of the question's
+   words rank higher, weighted by how rare each word is in the vault, and
+   word pairs that appear side by side ("sola scriptura", "ancestral sin")
+   add a bonus. A note whose title names the subject is lifted further.
 3. **Vault layer.** Wiki concept pages ×1.5, lessons ×1.3, Wiki sources
    and concept maps ×1.2, books and analyses ×1.0, daily readings ×0.9,
-   raw transcripts ×0.7. Link lists (Cross-References, Related, Source)
+   raw transcripts ×0.7. Indexes and the ingest log ×0.3. Link lists (Cross-References, Related, Source)
    are down-weighted because they match on slugs alone.
 4. **Your links.** Notes linked to or from the top five results gain a
    share of their score, and linked notes the words missed are listed
@@ -53,3 +60,12 @@ crates/cli    the `dsk` binary
 ```
 
 Run the tests with `cargo test`.
+
+## Checking search quality
+
+`eval/questions.txt` holds real study questions. After changing the
+ranking, run them all and compare the top results:
+
+```fish
+for q in (cat eval/questions.txt); echo "## $q"; dsk search -n 5 $q | grep -E '^ *[0-9]+\. '; end
+```
