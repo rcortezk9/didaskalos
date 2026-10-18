@@ -39,12 +39,18 @@ your user commands so they work from any folder:
 claude mcp add --scope user didaskalos -- dsk mcp --vault ~/Documents/Notes/Theology
 mkdir -p ~/.claude/commands
 ln -sf (pwd)/.claude/commands/ask.md ~/.claude/commands/ask.md
+ln -sf (pwd)/.claude/commands/lesson.md ~/.claude/commands/lesson.md
 ```
 
 Then in Claude Code: `/ask why don't the Orthodox hold to sola scriptura`.
 The answer cites sections as `[[slug#Heading]]`, separates what your
 notes say from anything added under "Beyond your notes", and is checked
 so every citation points at a real note and heading.
+
+`/lesson theosis` writes a synthesis lesson from your notes;
+`/lesson Raw/some_chapter.txt` writes a two-tier chapter lesson from a
+source. Either way the note is saved into the vault and its row added to
+`lessons_index.md`. The templates are in `crates/cli/templates/`.
 
 The server's tools:
 
@@ -55,6 +61,8 @@ The server's tools:
 | `neighbors` | What a note links to and what links to it |
 | `lessons` | Rows of `lessons_index.md`, filterable by words |
 | `check_citations` | Which `[[...]]` links in a draft point at missing notes or headings |
+| `lesson_format` | The chapter or synthesis lesson template and its rules |
+| `save_lesson` | Writes a lesson into the vault and its row into `lessons_index.md`; never replaces a file without `overwrite`, and backs up whatever it replaces to `.didaskalos/backups/` |
 
 On start it brings the keyword index up to date, so notes written since
 the last `dsk index` are searchable at once; run `dsk index` for their
@@ -98,7 +106,8 @@ vectors.
 ```
 crates/core   parsing (note.rs), schema (db.rs), indexing (index.rs), embeddings (embed.rs), ranking (search.rs)
 crates/cli    the `dsk` binary and the MCP server (mcp.rs)
-.claude/commands   slash commands for Claude Code (/ask)
+crates/cli/templates   lesson templates served by the lesson_format tool
+.claude/commands   slash commands for Claude Code (/ask, /lesson)
 ```
 
 Run the tests with `cargo test`.

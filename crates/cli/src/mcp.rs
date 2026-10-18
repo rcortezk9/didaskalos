@@ -92,6 +92,8 @@ impl Server {
             "neighbors" => self.neighbors(&args),
             "lessons" => self.lessons(&args),
             "check_citations" => self.check_citations(&args),
+            "lesson_format" => lesson_format(&args),
+            "save_lesson" => self.save_lesson(&args),
             _ => Err(anyhow!("unknown tool: {name}")),
         };
         match out {
@@ -288,6 +290,111 @@ impl Server {
         Ok(out)
     }
 
+    /// Write a lesson note into the vault, add or update its row in
+    /// `lessons_index.md`, and re-index so it is searchable at once.
+    /// Any file it replaces is copied to `.didaskalos/backups/` first.
+    fn save_lesson(&mut self, args: &Value) -> Result<String> {
+        let rel = vault_rel_path(str_arg(args, "path")?)?;
+        let content = str_arg(args, "content")?;
+        if !content.trim_start().starts_with("---") {
+            return Err(anyhow!("content must start with YAML frontmatter (---)"));
+        }
+        let overwrite = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+        let slug = normalize_slug(&rel);
+
+        // Wikilinks are by bare slug, so a second note with the same file
+        // name elsewhere would make [[slug]] ambiguous.
+        if let Ok((_, _, existing)) = self.find_note(&slug) {
+            if existing != rel {
+                return Err(anyhow!("a note named \"{slug}\" already exists at {existing}; pick another file name or save to that path"));
+            }
+        }
+        let full = self.vault.join(&rel);
+        let mut notes = Vec::new();
+        if full.exists() {
+            if !overwrite {
+                return Err(anyhow!("{rel} already exists; pass overwrite: true to replace it (the old file is backed up)"));
+            }
+            notes.push(format!("old version backed up to {}", self.backup(&rel)?));
+        }
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut body = content.trim_end().to_string();
+        body.push('\n');
+        std::fs::write(&full, body).with_context(|| format!("writing {rel}"))?;
+
+        if let Some(row) = args.get("index_row").filter(|v| v.is_object()) {
+            let field = |k: &str| -> Result<String> {
+                Ok(str_arg(row, k)?.replace('|', "/").replace('\n', " ").trim().to_string())
+            };
+            let line = format!(
+                "| {} | {} | {} | {} | [[{slug}]] |",
+                field("date")?, field("title")?, field("source")?, field("hook")?
+            );
+            notes.push(self.upsert_lesson_row(&slug, &line)?);
+        }
+
+        mcp_reindex(&mut self.conn, &self.vault)?;
+        let check = self.check_citations(&json!({ "text": content }))?;
+        let mut out = format!("Saved [[{slug}]] at {rel}.\n");
+        for n in notes {
+            out.push_str(&format!("- {n}\n"));
+        }
+        if check.contains("MISSING") {
+            out.push_str(&format!("\nSome citations do not resolve; fix them and save again with overwrite: true.\n{check}"));
+        }
+        Ok(out)
+    }
+
+    /// Put `line` in the lessons table: replace the row linking to
+    /// `[[slug]]` if there is one, otherwise add it after the last row.
+    fn upsert_lesson_row(&self, slug: &str, line: &str) -> Result<String> {
+        let rel = match self.find_note("lessons_index") {
+            Ok((_, _, p)) => p,
+            Err(_) => "lessons_index.md".to_string(),
+        };
+        let full = self.vault.join(&rel);
+        let raw = std::fs::read_to_string(&full).unwrap_or_else(|_| {
+            "---\ntitle: \"Lessons Index\"\ntags: [index, lessons]\n---\n\n# Lessons Index\n\n\
+             | Date | Title | Source | Hook | Link |\n|------|-------|--------|------|------|\n"
+                .to_string()
+        });
+        let link = format!("[[{slug}]]");
+        let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+        let what = if let Some(i) = lines.iter().position(|l| l.contains(&link)) {
+            lines[i] = line.to_string();
+            "updated its row in"
+        } else {
+            let last_row = lines.iter().rposition(|l| l.trim_start().starts_with('|'));
+            match last_row {
+                Some(i) => lines.insert(i + 1, line.to_string()),
+                None => lines.push(line.to_string()),
+            }
+            "added a row to"
+        };
+        if full.exists() {
+            self.backup(&rel)?;
+        }
+        std::fs::write(&full, lines.join("\n") + "\n")?;
+        Ok(format!("{what} {rel}"))
+    }
+
+    /// Copy a vault file to `.didaskalos/backups/<unix time>_<name>`.
+    /// The dot folder keeps backups out of the index and out of Obsidian.
+    fn backup(&self, rel: &str) -> Result<String> {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let name = rel.replace('/', "__");
+        let dest_rel = format!(".didaskalos/backups/{secs}_{name}");
+        let dest = self.vault.join(&dest_rel);
+        std::fs::create_dir_all(dest.parent().expect("backup path has a parent"))?;
+        std::fs::copy(self.vault.join(rel), &dest)?;
+        Ok(dest_rel)
+    }
+
     /// (slug, title, path) for a slug, ignoring case like Obsidian does.
     fn find_note(&self, slug: &str) -> Result<(String, String, String)> {
         self.conn
@@ -313,6 +420,36 @@ fn initialize(params: &Value) -> Value {
         "instructions": "Tools over the user's Orthodox theology Obsidian vault. Search before answering, \
             cite sections as [[slug#Heading]] exactly as search shows them, and run check_citations on a draft."
     })
+}
+
+const CHAPTER_FORMAT: &str = include_str!("../templates/chapter.md");
+const SYNTHESIS_FORMAT: &str = include_str!("../templates/synthesis.md");
+
+fn lesson_format(args: &Value) -> Result<String> {
+    match args.get("kind").and_then(Value::as_str).unwrap_or("") {
+        "chapter" => Ok(CHAPTER_FORMAT.to_string()),
+        "synthesis" | "topic" => Ok(SYNTHESIS_FORMAT.to_string()),
+        k => Err(anyhow!("unknown lesson kind \"{k}\"; use chapter or synthesis")),
+    }
+}
+
+/// A safe vault-relative `.md` path: no absolute paths, no `..`, no dot
+/// folders, so a lesson can only land inside the vault's own notes.
+fn vault_rel_path(p: &str) -> Result<String> {
+    let p = p.trim().replace('\\', "/");
+    let p = p.trim_start_matches("./");
+    if p.starts_with('/') || !p.ends_with(".md") {
+        return Err(anyhow!("path must be relative to the vault and end in .md, e.g. Orthodox/Lessons/theosis_synthesis_lesson.md"));
+    }
+    if p.split('/').any(|c| c.is_empty() || c == ".." || c.starts_with('.')) {
+        return Err(anyhow!("path may not contain empty parts, .. or dot folders: {p}"));
+    }
+    Ok(p.to_string())
+}
+
+fn mcp_reindex(conn: &mut Connection, vault: &Path) -> Result<()> {
+    didaskalos_core::index::update(conn, vault, false)?;
+    Ok(())
 }
 
 fn tool_list() -> Value {
@@ -372,6 +509,43 @@ fn tool_list() -> Value {
                 "type": "object",
                 "properties": { "text": { "type": "string", "description": "The draft answer" } },
                 "required": ["text"]
+            }
+        },
+        {
+            "name": "lesson_format",
+            "description": "The user's lesson template and rules. kind: chapter (one chapter, video or talk, \
+                two-tier Text Analysis) or synthesis (an integrated lesson on a topic or across several notes). \
+                Read it before writing a lesson.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "kind": { "type": "string", "enum": ["chapter", "synthesis"] } },
+                "required": ["kind"]
+            }
+        },
+        {
+            "name": "save_lesson",
+            "description": "Save a finished lesson note into the vault and add (or update) its row in \
+                lessons_index.md. Refuses to replace an existing file unless overwrite is true, and backs \
+                up anything it replaces. Re-indexes and reports citations that do not resolve.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Vault-relative path ending in .md, e.g. Orthodox/Lessons/theosis_synthesis_lesson.md" },
+                    "content": { "type": "string", "description": "The whole note, starting with --- frontmatter" },
+                    "index_row": {
+                        "type": "object",
+                        "description": "Row for lessons_index.md; the Link column is filled in from the file name",
+                        "properties": {
+                            "date": { "type": "string" },
+                            "title": { "type": "string" },
+                            "source": { "type": "string" },
+                            "hook": { "type": "string", "description": "One-sentence thesis" }
+                        },
+                        "required": ["date", "title", "source", "hook"]
+                    },
+                    "overwrite": { "type": "boolean", "description": "Replace an existing file (backed up first)" }
+                },
+                "required": ["path", "content"]
             }
         }
     ])
@@ -473,6 +647,47 @@ mod tests {
     fn slugs_normalize() {
         assert_eq!(normalize_slug("Wiki/concept_theosis.md"), "concept_theosis");
         assert_eq!(normalize_slug("[[concept_theosis#How|theosis]]"), "concept_theosis");
+    }
+
+    #[test]
+    fn lesson_paths_stay_in_vault() {
+        assert_eq!(vault_rel_path("./Orthodox/Lessons/x_lesson.md").unwrap(), "Orthodox/Lessons/x_lesson.md");
+        assert!(vault_rel_path("/etc/passwd.md").is_err());
+        assert!(vault_rel_path("../x.md").is_err());
+        assert!(vault_rel_path(".obsidian/x.md").is_err());
+        assert!(vault_rel_path("x.txt").is_err());
+    }
+
+    #[test]
+    fn save_lesson_writes_note_and_index_row() {
+        let dir = std::env::temp_dir().join(format!("dsk_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lessons_index.md"),
+            "# Lessons Index\n\n| Date | Title | Source | Hook | Link |\n|---|---|---|---|---|\n| 2026-01-01 | Old | S | H | [[old_lesson]] |\n\nAfter.\n").unwrap();
+        let mut conn = didaskalos_core::db::open(&dir.join("index.db")).unwrap();
+        mcp_reindex(&mut conn, &dir).unwrap();
+        let mut s = Server::new(conn, dir.clone());
+        let args = json!({
+            "path": "Lessons/new_lesson.md",
+            "content": "---\ntitle: New\n---\n# New\nSee [[old_lesson]].",
+            "index_row": { "date": "2026-10-18", "title": "New | One", "source": "Me", "hook": "Hook" }
+        });
+        let out = s.save_lesson(&args).unwrap();
+        assert!(out.contains("Saved [[new_lesson]]"), "{out}");
+        let index = std::fs::read_to_string(dir.join("lessons_index.md")).unwrap();
+        assert!(index.contains("| [[old_lesson]] |\n| 2026-10-18 | New / One | Me | Hook | [[new_lesson]] |\n\nAfter."), "{index}");
+        // A second save without overwrite is refused; with it, the row is replaced, not duplicated.
+        assert!(s.save_lesson(&args).is_err());
+        let mut again = args.clone();
+        again["overwrite"] = json!(true);
+        again["index_row"]["hook"] = json!("Better hook");
+        s.save_lesson(&again).unwrap();
+        let index = std::fs::read_to_string(dir.join("lessons_index.md")).unwrap();
+        assert_eq!(index.matches("[[new_lesson]]").count(), 1);
+        assert!(index.contains("Better hook"));
+        assert!(dir.join(".didaskalos/backups").read_dir().unwrap().count() >= 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
