@@ -14,7 +14,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use didaskalos_core::search;
+use didaskalos_core::{note, review, search};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -94,6 +94,8 @@ impl Server {
             "check_citations" => self.check_citations(&args),
             "lesson_format" => lesson_format(&args),
             "save_lesson" => self.save_lesson(&args),
+            "due" => self.due(&args),
+            "record_review" => self.record_review(&args),
             _ => Err(anyhow!("unknown tool: {name}")),
         };
         match out {
@@ -395,6 +397,65 @@ impl Server {
         Ok(dest_rel)
     }
 
+    /// Notes due for review today, and lessons never reviewed yet.
+    fn due(&self, args: &Value) -> Result<String> {
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10).clamp(1, 50) as usize;
+        let today = review::today();
+        let due = review::due(&self.conn, &today, limit)?;
+        let mut out = format!("Today is {today}.\n\n");
+        if due.is_empty() {
+            out.push_str("Nothing is due.");
+            if let Some((d, n)) = review::next_due(&self.conn, &today)? {
+                out.push_str(&format!(" Next review: {d} ({n} notes scheduled)."));
+            }
+            out.push('\n');
+        } else {
+            out.push_str(&format!("Due ({}):\n", due.len()));
+            for n in &due {
+                let late = match n.overdue {
+                    Some(0) | None => "due today".to_string(),
+                    Some(d) => format!("{d} days overdue"),
+                };
+                out.push_str(&format!(
+                    "- [[{}]] {} ({}, {late}, last gap {} days, streak {})\n",
+                    n.slug, n.title, n.kind, n.interval.unwrap_or(0), n.streak.unwrap_or(0)
+                ));
+            }
+        }
+        if args.get("include_new").and_then(Value::as_bool).unwrap_or(true) {
+            let fresh = review::new_notes(&self.conn, limit)?;
+            if !fresh.is_empty() {
+                out.push_str("\nNever reviewed (start any of these):\n");
+                for n in fresh {
+                    out.push_str(&format!("- [[{}]] {} ({})\n", n.slug, n.title, n.kind));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Grade a review and write the next due date into the note.
+    fn record_review(&mut self, args: &Value) -> Result<String> {
+        let slug = normalize_slug(str_arg(args, "slug")?);
+        let grade = review::Grade::parse(str_arg(args, "grade")?)?;
+        let (slug, title, rel) = self.find_note(&slug)?;
+        let full = self.vault.join(&rel);
+        let raw = std::fs::read_to_string(&full).with_context(|| format!("reading {rel}"))?;
+
+        // Read the schedule from the file itself, in case it was edited
+        // since the last index.
+        let before = note::parse(&rel, &raw).recall;
+        let (interval, streak) = review::schedule(before.interval, before.streak, grade);
+        let today = review::today();
+        let next = review::add_days(&today, interval)?;
+        std::fs::write(&full, review::set_recall(&raw, &next, interval, streak)?)
+            .with_context(|| format!("writing {rel}"))?;
+        mcp_reindex(&mut self.conn, &self.vault)?;
+        Ok(format!(
+            "Recorded {grade:?} for [[{slug}]] {title}. Next review {next} (in {interval} days), streak {streak}."
+        ))
+    }
+
     /// (slug, title, path) for a slug, ignoring case like Obsidian does.
     fn find_note(&self, slug: &str) -> Result<(String, String, String)> {
         self.conn
@@ -547,6 +608,32 @@ fn tool_list() -> Value {
                 },
                 "required": ["path", "content"]
             }
+        },
+        {
+            "name": "due",
+            "description": "Notes due for spaced-repetition review today (from their recall_due frontmatter), \
+                most overdue first, plus lessons and studies never reviewed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Most notes to list (default 10)" },
+                    "include_new": { "type": "boolean", "description": "Also list never-reviewed lessons (default true)" }
+                }
+            }
+        },
+        {
+            "name": "record_review",
+            "description": "Record how a review of a note went and schedule the next one. Writes recall_due, \
+                recall_interval and recall_streak into the note's frontmatter. grade: again (could not recall), \
+                hard (gaps or real effort), good (main points), easy (all of it, at once).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "grade": { "type": "string", "enum": ["again", "hard", "good", "easy"] }
+                },
+                "required": ["slug", "grade"]
+            }
         }
     ])
 }
@@ -687,6 +774,27 @@ mod tests {
         assert_eq!(index.matches("[[new_lesson]]").count(), 1);
         assert!(index.contains("Better hook"));
         assert!(dir.join(".didaskalos/backups").read_dir().unwrap().count() >= 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn record_review_schedules_the_note() {
+        let dir = std::env::temp_dir().join(format!("dsk_review_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a_lesson.md"), "---\ntitle: A\n---\n# A\n").unwrap();
+        std::env::set_var("DSK_TODAY", "2026-10-19");
+        let mut conn = didaskalos_core::db::open(&dir.join("index.db")).unwrap();
+        mcp_reindex(&mut conn, &dir).unwrap();
+        let mut s = Server::new(conn, dir.clone());
+        assert!(s.due(&json!({})).unwrap().contains("Never reviewed"));
+        let out = s.record_review(&json!({ "slug": "a_lesson", "grade": "good" })).unwrap();
+        assert!(out.contains("2026-10-20"), "{out}");
+        s.record_review(&json!({ "slug": "a_lesson", "grade": "good" })).unwrap();
+        let raw = std::fs::read_to_string(dir.join("a_lesson.md")).unwrap();
+        assert!(raw.contains("recall_due: 2026-10-22\nrecall_interval: 3\nrecall_streak: 2"), "{raw}");
+        std::env::set_var("DSK_TODAY", "2026-10-23");
+        assert!(s.due(&json!({})).unwrap().contains("1 days overdue"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

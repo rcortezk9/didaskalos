@@ -3,6 +3,7 @@
 //!   dsk index            bring the index up to date (only changed notes)
 //!   dsk search "query"   ranked notes with the sections that matched
 //!   dsk stats            what the index holds
+//!   dsk due              notes due for review today
 //!   dsk mcp              serve the vault to Claude Code (MCP over stdio)
 //!   dsk completions fish > ~/.config/fish/completions/dsk.fish
 
@@ -12,7 +13,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
-use didaskalos_core::{db, index, search};
+use didaskalos_core::{db, index, review, search};
 
 mod mcp;
 
@@ -52,6 +53,12 @@ enum Cmd {
     },
     /// Show what the index holds.
     Stats,
+    /// List notes due for review today, and lessons never reviewed.
+    Due {
+        /// Most notes to list.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Serve the vault to Claude Code as MCP tools over stdin/stdout.
     /// Register with: claude mcp add didaskalos -- dsk mcp
     Mcp,
@@ -119,6 +126,32 @@ fn main() -> Result<()> {
                 s.notes, s.chunks, s.links, s.dangling_links);
             for (kind, n) in s.by_kind {
                 println!("  {kind:14} {n}");
+            }
+        }
+        Cmd::Due { limit } => {
+            // Pick up reviews recorded or notes edited since the last run.
+            let vault = vault_path(&cli);
+            if vault.is_dir() {
+                index::update(&mut conn, &vault, false)?;
+            }
+            let today = review::today();
+            let due = review::due(&conn, &today, *limit)?;
+            if due.is_empty() {
+                print!("Nothing due today.");
+                match review::next_due(&conn, &today)? {
+                    Some((d, n)) => println!(" Next: {d} ({n} scheduled)."),
+                    None => println!(),
+                }
+            } else {
+                println!("{} due today ({today}):", due.len());
+                for n in &due {
+                    let late = n.overdue.filter(|d| *d > 0).map(|d| format!("  +{d}d")).unwrap_or_default();
+                    println!("  {:40} {}{late}", n.slug, n.title);
+                }
+            }
+            let fresh = review::new_notes(&conn, 1000)?;
+            if !fresh.is_empty() {
+                println!("{} lessons never reviewed. Start in Claude Code with /review.", fresh.len());
             }
         }
         Cmd::Mcp => {

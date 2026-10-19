@@ -62,12 +62,17 @@ pub fn update(conn: &mut Connection, vault: &Path, full: bool) -> Result<Report>
             .to_string_lossy()
             .replace('\\', "/");
 
+        // Vectors of sections whose text did not change, so editing one
+        // line (or recording a review in the frontmatter) does not throw
+        // away the embeddings of the whole note.
+        let mut kept = HashMap::new();
         match known.remove(&rel) {
             Some((_, old_hash)) if old_hash == hash => {
                 report.unchanged += 1;
                 continue;
             }
             Some((id, _)) => {
+                kept = old_vectors(&tx, id)?;
                 delete_note(&tx, id)?;
                 report.updated += 1;
             }
@@ -89,7 +94,7 @@ pub fn update(conn: &mut Connection, vault: &Path, full: bool) -> Result<Report>
             parsed.slug = rel.clone();
         }
         report.chunks += parsed.chunks.len();
-        insert_note(&tx, &parsed, &hash)?;
+        insert_note(&tx, &parsed, &hash, &kept)?;
     }
 
     // Anything left in `known` is no longer on disk.
@@ -99,6 +104,16 @@ pub fn update(conn: &mut Connection, vault: &Path, full: bool) -> Result<Report>
     }
     tx.commit()?;
     Ok(report)
+}
+
+/// (heading path, text) -> stored vector, for one note's chunks.
+fn old_vectors(conn: &Connection, note_id: i64) -> Result<HashMap<(String, String), Vec<u8>>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT c.heading_path, c.text, v.vec FROM chunks c JOIN chunk_vec v ON v.chunk_id = c.id
+         WHERE c.note_id = ?1",
+    )?;
+    let rows = stmt.query_map([note_id], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 fn delete_note(conn: &Connection, id: i64) -> Result<()> {
@@ -111,7 +126,12 @@ fn delete_note(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-fn insert_note(conn: &Connection, n: &Note, hash: &str) -> Result<()> {
+fn insert_note(
+    conn: &Connection,
+    n: &Note,
+    hash: &str,
+    kept: &HashMap<(String, String), Vec<u8>>,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO notes (slug, path, title, kind, tags, hash, recall_due, recall_interval, recall_streak)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -141,6 +161,9 @@ fn insert_note(conn: &Connection, n: &Note, hash: &str) -> Result<()> {
         // or `soteriology` find the note by keyword.
         let title_field = format!("{} {}", n.title, n.tags.join(" ").replace('/', " "));
         fts_stmt.execute(params![chunk_id, title_field, c.heading_path, c.text])?;
+        if let Some(vec) = kept.get(&(c.heading_path.clone(), c.text.clone())) {
+            conn.execute("INSERT INTO chunk_vec (chunk_id, vec) VALUES (?1, ?2)", params![chunk_id, vec])?;
+        }
     }
 
     let mut link_stmt =
@@ -149,6 +172,28 @@ fn insert_note(conn: &Connection, n: &Note, hash: &str) -> Result<()> {
         link_stmt.execute(params![note_id, l.target, l.heading, l.kind])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editing_frontmatter_keeps_section_vectors() {
+        let dir = std::env::temp_dir().join(format!("dsk_index_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), "---\ntitle: A\n---\n## One\nThe first section, long enough to be kept as a chunk of its own.\n## Two\nThe second section, also long enough to be kept as a chunk.\n").unwrap();
+        let mut conn = crate::db::open(&dir.join("index.db")).unwrap();
+        update(&mut conn, &dir, false).unwrap();
+        let n = conn.execute("INSERT INTO chunk_vec (chunk_id, vec) SELECT id, x'00' FROM chunks", []).unwrap();
+        assert_eq!(n, 2);
+        std::fs::write(dir.join("a.md"), "---\ntitle: A\nrecall_due: 2026-10-20\n---\n## One\nThe first section, long enough to be kept as a chunk of its own.\n## Two\nThe second section, now edited, and long enough to be kept as a chunk.\n").unwrap();
+        update(&mut conn, &dir, false).unwrap();
+        let kept: i64 = conn.query_row("SELECT COUNT(*) FROM chunk_vec", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 1, "only the unchanged section keeps its vector");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[derive(Debug)]

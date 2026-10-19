@@ -23,6 +23,7 @@ dsk index                     # first run reads everything; later runs only chan
 dsk search is Adam\'s guilt inherited
 dsk search -n 3 --json uncreated energies   # JSON for scripts and the MCP server
 dsk stats
+dsk due                       # notes due for review today
 ```
 
 The index lives at `~/.local/share/didaskalos/index.db` (override with
@@ -40,6 +41,7 @@ claude mcp add --scope user didaskalos -- dsk mcp --vault ~/Documents/Notes/Theo
 mkdir -p ~/.claude/commands
 ln -sf (pwd)/.claude/commands/ask.md ~/.claude/commands/ask.md
 ln -sf (pwd)/.claude/commands/lesson.md ~/.claude/commands/lesson.md
+ln -sf (pwd)/.claude/commands/review.md ~/.claude/commands/review.md
 ```
 
 Then in Claude Code: `/ask why don't the Orthodox hold to sola scriptura`.
@@ -52,6 +54,13 @@ so every citation points at a real note and heading.
 source. Either way the note is saved into the vault and its row added to
 `lessons_index.md`. The templates are in `crates/cli/templates/`.
 
+`/review` quizzes you on the notes due today, one question at a time,
+then grades each note (again, hard, good, easy) and writes the next
+review date into its `recall_due` / `recall_interval` / `recall_streak`
+frontmatter. Gaps grow 1, 3, 7, 15, 33 days with good answers and drop
+back to 1 day after a miss. `/review theosis` reviews one note now.
+`dsk due` lists what is due from the terminal.
+
 The server's tools:
 
 | Tool | What it gives Claude |
@@ -62,6 +71,8 @@ The server's tools:
 | `lessons` | Rows of `lessons_index.md`, filterable by words |
 | `check_citations` | Which `[[...]]` links in a draft point at missing notes or headings |
 | `lesson_format` | The chapter or synthesis lesson template and its rules |
+| `due` | Notes due for review today, most overdue first, and lessons never reviewed |
+| `record_review` | Grades a review and writes the next due date into the note |
 | `save_lesson` | Writes a lesson into the vault and its row into `lessons_index.md`; never replaces a file without `overwrite`, and backs up whatever it replaces to `.didaskalos/backups/` |
 
 On start it brings the keyword index up to date, so notes written since
