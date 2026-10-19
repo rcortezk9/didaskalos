@@ -24,6 +24,7 @@ dsk search is Adam\'s guilt inherited
 dsk search -n 3 --json uncreated energies   # JSON for scripts and the MCP server
 dsk stats
 dsk due                       # notes due for review today
+dsk listen                    # record a spoken answer and print the transcript
 ```
 
 The index lives at `~/.local/share/didaskalos/index.db` (override with
@@ -42,6 +43,7 @@ mkdir -p ~/.claude/commands
 ln -sf (pwd)/.claude/commands/ask.md ~/.claude/commands/ask.md
 ln -sf (pwd)/.claude/commands/lesson.md ~/.claude/commands/lesson.md
 ln -sf (pwd)/.claude/commands/review.md ~/.claude/commands/review.md
+ln -sf (pwd)/.claude/commands/apologia.md ~/.claude/commands/apologia.md
 ```
 
 Then in Claude Code: `/ask why don't the Orthodox hold to sola scriptura`.
@@ -61,6 +63,25 @@ frontmatter. Gaps grow 1, 3, 7, 15, 33 days with good answers and drop
 back to 1 day after a miss. `/review theosis` reviews one note now.
 `dsk due` lists what is due from the terminal.
 
+`/apologia` runs an apologetics drill. A realistic objector raises an
+objection from your response notes, you answer, it pushes back once or
+twice, and then it grades your first answer on eight criteria out of 24
+against the note's own headings (The Claim, Where It Goes Wrong,
+Scriptural Ground …), with a critique and a stronger reply. Each attempt
+is logged to `Practice_Log/` in the vault, one note per objection, and
+the score sets when that objection comes back. `/apologia papal --voice`
+lets you answer aloud.
+
+Spoken answers use `dsk listen`. It records from the microphone until you
+pause (or press Enter in a terminal), transcribes on your machine with
+faster-whisper, and prints the transcript with length, pace and
+filler-word checks. The audio is deleted unless you pass `--keep`.
+
+```fish
+pip install --user faster-whisper     # once; the model downloads on first use
+dsk listen                            # try it; set DSK_WHISPER_MODEL=small.en for better accuracy
+```
+
 The server's tools:
 
 | Tool | What it gives Claude |
@@ -73,6 +94,8 @@ The server's tools:
 | `lesson_format` | The chapter or synthesis lesson template and its rules |
 | `due` | Notes due for review today, most overdue first, and lessons never reviewed |
 | `record_review` | Grades a review and writes the next due date into the note |
+| `objections` | The objection bank built from your response notes, with each card's practice history and what is due |
+| `log_practice` | Writes a graded drill to the card's `Practice_Log/` note and schedules the card from the score |
 | `save_lesson` | Writes a lesson into the vault and its row into `lessons_index.md`; never replaces a file without `overwrite`, and backs up whatever it replaces to `.didaskalos/backups/` |
 
 On start it brings the keyword index up to date, so notes written since

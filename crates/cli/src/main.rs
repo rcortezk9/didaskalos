@@ -4,6 +4,7 @@
 //!   dsk search "query"   ranked notes with the sections that matched
 //!   dsk stats            what the index holds
 //!   dsk due              notes due for review today
+//!   dsk listen           record a spoken answer and print the transcript
 //!   dsk mcp              serve the vault to Claude Code (MCP over stdio)
 //!   dsk completions fish > ~/.config/fish/completions/dsk.fish
 
@@ -15,6 +16,7 @@ use anyhow::{bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use didaskalos_core::{db, index, review, search};
 
+mod listen;
 mod mcp;
 
 #[derive(Parser)]
@@ -59,6 +61,25 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
     },
+    /// Record a spoken answer, transcribe it locally, and print the
+    /// transcript with delivery checks (length, pace, filler words).
+    Listen {
+        /// Longest recording, in seconds.
+        #[arg(long, default_value_t = 180.0)]
+        max: f32,
+        /// Pause, in seconds, that ends the recording.
+        #[arg(long, default_value_t = 3.0)]
+        silence: f32,
+        /// Keep the recording in ~/.cache/didaskalos/answers.
+        #[arg(long)]
+        keep: bool,
+        /// Transcribe this WAV file instead of recording.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Serve the vault to Claude Code as MCP tools over stdin/stdout.
     /// Register with: claude mcp add didaskalos -- dsk mcp
     Mcp,
@@ -85,6 +106,14 @@ fn db_path(cli: &Cli) -> PathBuf {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Cmd::Listen { max, silence, keep, file, json } = &cli.cmd {
+        // The index only adds note titles to the spelling prompt, so a
+        // missing one is not an error.
+        let conn = db::open(&db_path(&cli)).ok();
+        let opts = listen::Options { max_secs: *max, silence_secs: *silence, keep: *keep, file: file.clone(), json: *json };
+        return listen::run(conn.as_ref(), &opts);
+    }
 
     if let Cmd::Completions { shell } = &cli.cmd {
         clap_complete::generate(*shell, &mut Cli::command(), "dsk", &mut std::io::stdout());
@@ -162,7 +191,7 @@ fn main() -> Result<()> {
             mcp::refresh(&mut conn, &vault)?;
             mcp::Server::new(conn, vault).run()?;
         }
-        Cmd::Completions { .. } => unreachable!(),
+        Cmd::Completions { .. } | Cmd::Listen { .. } => unreachable!(),
     }
     Ok(())
 }

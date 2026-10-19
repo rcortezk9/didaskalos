@@ -9,6 +9,7 @@ pub mod db;
 pub mod embed;
 pub mod index;
 pub mod note;
+pub mod practice;
 pub mod query;
 pub mod review;
 pub mod search;

@@ -201,6 +201,7 @@ pub fn due(conn: &Connection, today: &str, limit: usize) -> Result<Vec<DueNote>>
     let mut stmt = conn.prepare(
         "SELECT slug, title, kind, path, recall_due, recall_interval, recall_streak FROM notes
          WHERE recall_due IS NOT NULL AND recall_due <= ?1
+           AND path NOT LIKE 'Practice_Log/%'
          ORDER BY recall_due, slug LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![today, limit as i64], row_to_due)?;
@@ -227,7 +228,7 @@ pub fn new_notes(conn: &Connection, limit: usize) -> Result<Vec<DueNote>> {
 /// The next due date after `today`, if any note is scheduled.
 pub fn next_due(conn: &Connection, today: &str) -> Result<Option<(String, i64)>> {
     let row = conn.query_row(
-        "SELECT MIN(recall_due), COUNT(*) FROM notes WHERE recall_due > ?1",
+        "SELECT MIN(recall_due), COUNT(*) FROM notes WHERE recall_due > ?1 AND path NOT LIKE 'Practice_Log/%'",
         [today],
         |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)),
     )?;

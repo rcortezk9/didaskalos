@@ -158,7 +158,7 @@ pub fn parse(rel_path: &str, raw: &str) -> Note {
 }
 
 /// Split `---\n...\n---` frontmatter off the top of a Markdown file.
-fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
+pub fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
     let rest = match raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n")) {
         Some(r) => r,
         None => return (None, raw),
@@ -198,7 +198,9 @@ fn first_h1(body: &str) -> Option<String> {
 /// Decide the vault layer from the folder, the file name and `type:`.
 fn classify(rel_path: &str, slug: &str, fm_type: &str) -> Kind {
     let p = rel_path.to_ascii_lowercase();
-    if p.starts_with("raw/") || p.contains("/raw/") || p.ends_with(".txt") {
+    // Practice_Log holds your own drill answers, right or wrong, so it
+    // ranks with the raw material rather than with the teaching notes.
+    if p.starts_with("raw/") || p.contains("/raw/") || p.ends_with(".txt") || p.starts_with("practice_log/") {
         Kind::Raw
     } else if p.starts_with("wiki/") {
         match fm_type {

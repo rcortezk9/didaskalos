@@ -14,7 +14,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use didaskalos_core::{note, review, search};
+use didaskalos_core::{note, practice, review, search};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -96,6 +96,8 @@ impl Server {
             "save_lesson" => self.save_lesson(&args),
             "due" => self.due(&args),
             "record_review" => self.record_review(&args),
+            "objections" => self.objections(&args),
+            "log_practice" => self.log_practice(&args),
             _ => Err(anyhow!("unknown tool: {name}")),
         };
         match out {
@@ -456,6 +458,102 @@ impl Server {
         ))
     }
 
+    /// The objection bank, with each card's practice history, and the
+    /// cards due for another drill.
+    fn objections(&self, args: &Value) -> Result<String> {
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(30).clamp(1, 200) as usize;
+        let words: Vec<String> = args
+            .get("filter")
+            .and_then(Value::as_str)
+            .map(|f| f.split_whitespace().map(str::to_lowercase).collect())
+            .unwrap_or_default();
+        let today = review::today();
+        let cards = practice::cards(&self.conn)?;
+        let progress = practice::progress(&self.vault)?;
+
+        let mut out = format!("{} objection cards in the vault. Today is {today}.\n", cards.len());
+        let mut due: Vec<(&practice::Card, &practice::Progress)> = cards
+            .iter()
+            .filter_map(|c| progress.get(&c.id).map(|p| (c, p)))
+            .filter(|(_, p)| p.due.as_deref().map_or(false, |d| d <= today.as_str()))
+            .collect();
+        due.sort_by(|a, b| a.1.due.cmp(&b.1.due));
+        if !due.is_empty() {
+            out.push_str("\nDue for another drill:\n");
+            for (c, p) in &due {
+                out.push_str(&format!(
+                    "- [[{}]] \"{}\" (last {}/24 on {}, due {})\n",
+                    c.id, c.objection, p.last_score.unwrap_or(0), p.last_date.as_deref().unwrap_or("?"), p.due.as_deref().unwrap_or("?")
+                ));
+            }
+        }
+
+        let matching: Vec<&practice::Card> = cards
+            .iter()
+            .filter(|c| {
+                let hay = format!("{} {} {} {}", c.id, c.objection, c.topic, c.note_title).to_lowercase();
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+            .collect();
+        out.push_str(&format!(
+            "\n{} cards{}:\n",
+            matching.len(),
+            if words.is_empty() { String::new() } else { format!(" matching \"{}\"", words.join(" ")) }
+        ));
+        let mut topic = String::new();
+        for c in matching.iter().take(limit) {
+            if c.topic != topic {
+                topic = c.topic.clone();
+                out.push_str(&format!("\n{topic}\n"));
+            }
+            let status = match progress.get(&c.id) {
+                Some(p) => format!("{} tries, last {}/24, next {}", p.attempts, p.last_score.unwrap_or(0), p.due.as_deref().unwrap_or("?")),
+                None => "never drilled".into(),
+            };
+            out.push_str(&format!("- [[{}]] \"{}\" ({status})\n", c.id, c.objection));
+        }
+        if matching.len() > limit {
+            out.push_str(&format!("… {} more; narrow with filter.\n", matching.len() - limit));
+        }
+        Ok(out)
+    }
+
+    /// Record one graded drill in the card's Practice_Log note.
+    fn log_practice(&mut self, args: &Value) -> Result<String> {
+        let text = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let scores = args
+            .get("scores")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("missing \"scores\": eight {{score, why}} objects in rubric order"))?
+            .iter()
+            .map(|v| {
+                let score = v.get("score").and_then(Value::as_i64).ok_or_else(|| anyhow!("each score needs a number"))?;
+                Ok((score, v.get("why").and_then(Value::as_str).unwrap_or("").to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let attempt = practice::Attempt {
+            card: str_arg(args, "card")?.trim().trim_start_matches("[[").trim_end_matches("]]").to_string(),
+            objection: str_arg(args, "objection")?.to_string(),
+            objector: text("objector"),
+            mode: if text("mode").is_empty() { "typed".into() } else { text("mode") },
+            answer: str_arg(args, "answer")?.to_string(),
+            scores,
+            accuracy_problem: args.get("accuracy_problem").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_string),
+            critique: text("critique"),
+            stronger: text("stronger_response"),
+            pushback: text("pushback"),
+            vault_gaps: text("vault_gaps"),
+            delivery: text("delivery"),
+        };
+        let today = review::today();
+        let logged = practice::log_attempt(&self.vault, &attempt, &today)?;
+        mcp_reindex(&mut self.conn, &self.vault)?;
+        Ok(format!(
+            "Logged attempt {} at {}: {}/24, {}. This card comes back {} (in {} days).",
+            logged.attempts, logged.path, logged.total, logged.band, logged.next_due, logged.interval
+        ))
+    }
+
     /// (slug, title, path) for a slug, ignoring case like Obsidian does.
     fn find_note(&self, slug: &str) -> Result<(String, String, String)> {
         self.conn
@@ -633,6 +731,51 @@ fn tool_list() -> Value {
                     "grade": { "type": "string", "enum": ["again", "hard", "good", "easy"] }
                 },
                 "required": ["slug", "grade"]
+            }
+        },
+        {
+            "name": "objections",
+            "description": "The apologetics objection bank built from the vault's response notes (Reason N blocks, \
+                _response notes, elevator_statements, Q&A objections), each with its source citation and practice \
+                history, plus the cards due for another drill. Filter by words, e.g. \"papal\" or \"Catholic\".",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filter": { "type": "string", "description": "Words that must all appear in the card, its note or its folder" },
+                    "limit": { "type": "integer", "description": "Most cards to list (default 30)" }
+                }
+            }
+        },
+        {
+            "name": "log_practice",
+            "description": "Record a graded apologetics drill in the card's Practice_Log note and schedule the card: \
+                under 8 tomorrow, 8-13 in two days, 14-19 in a week, 20+ doubles the gap. Scores are eight 0-3 \
+                numbers in rubric order: Fair statement, Root error, Scripture, Fathers and councils, Their own \
+                premise, Next move, Honesty, Delivery. An accuracy_problem caps the total at 12.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "card": { "type": "string", "description": "Card id from objections, e.g. ten_reasons_not_to_convert_response#Reason 2 — Penal substitution" },
+                    "objection": { "type": "string", "description": "The objection as the objector put it" },
+                    "objector": { "type": "string", "description": "Who voiced it, e.g. Reformed Baptist" },
+                    "mode": { "type": "string", "enum": ["typed", "spoken"] },
+                    "answer": { "type": "string", "description": "The user's answer, or the corrected transcript" },
+                    "scores": {
+                        "type": "array", "minItems": 8, "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": { "score": { "type": "integer", "minimum": 0, "maximum": 3 }, "why": { "type": "string" } },
+                            "required": ["score", "why"]
+                        }
+                    },
+                    "accuracy_problem": { "type": "string", "description": "The fabricated or wrong quote, verse or canon, if any" },
+                    "critique": { "type": "string" },
+                    "stronger_response": { "type": "string" },
+                    "pushback": { "type": "string", "description": "The follow-up exchanges, briefly" },
+                    "vault_gaps": { "type": "string" },
+                    "delivery": { "type": "string", "description": "Spoken rounds: length, filler words, first sentence" }
+                },
+                "required": ["card", "objection", "answer", "scores"]
             }
         }
     ])
