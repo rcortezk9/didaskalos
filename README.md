@@ -8,6 +8,8 @@ those notes to Claude Code so it can answer questions from them (`/ask`).
 Later phases add lessons, spaced-repetition review and apologetics
 coaching on the same server. The design doc lives in the project.
 
+**New here? Read the [manual](docs/MANUAL.md):** what each mode does, setup, a typical week and troubleshooting.
+
 ## Install
 
 ```fish
