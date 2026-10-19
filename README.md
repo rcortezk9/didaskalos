@@ -44,6 +44,7 @@ ln -sf (pwd)/.claude/commands/ask.md ~/.claude/commands/ask.md
 ln -sf (pwd)/.claude/commands/lesson.md ~/.claude/commands/lesson.md
 ln -sf (pwd)/.claude/commands/review.md ~/.claude/commands/review.md
 ln -sf (pwd)/.claude/commands/apologia.md ~/.claude/commands/apologia.md
+ln -sf (pwd)/.claude/commands/study.md ~/.claude/commands/study.md
 ```
 
 Then in Claude Code: `/ask why don't the Orthodox hold to sola scriptura`.
@@ -62,6 +63,14 @@ review date into its `recall_due` / `recall_interval` / `recall_streak`
 frontmatter. Gaps grow 1, 3, 7, 15, 33 days with good answers and drop
 back to 1 day after a miss. `/review theosis` reviews one note now.
 `dsk due` lists what is due from the terminal.
+
+`/study On the Incarnation 20-32` walks you through a section-study
+note's argument one step at a time. It asks each step's connector
+question, waits for your answer, then shows the step. It then asks
+whether the argument holds up, runs the note's Review Questions against
+its Recall Key, and schedules the next review. With no study note for a
+text, it builds one first, using your `section-study` skill if it is
+installed, or the section-study template otherwise.
 
 `/apologia` runs an apologetics drill. A realistic objector raises an
 objection from your response notes, you answer, it pushes back once or
@@ -91,7 +100,7 @@ The server's tools:
 | `neighbors` | What a note links to and what links to it |
 | `lessons` | Rows of `lessons_index.md`, filterable by words |
 | `check_citations` | Which `[[...]]` links in a draft point at missing notes or headings |
-| `lesson_format` | The chapter or synthesis lesson template and its rules |
+| `lesson_format` | The chapter, synthesis or section-study template and its rules |
 | `due` | Notes due for review today, most overdue first, and lessons never reviewed |
 | `record_review` | Grades a review and writes the next due date into the note |
 | `objections` | The objection bank built from your response notes, with each card's practice history and what is due |
@@ -141,7 +150,7 @@ vectors.
 crates/core   parsing (note.rs), schema (db.rs), indexing (index.rs), embeddings (embed.rs), ranking (search.rs)
 crates/cli    the `dsk` binary and the MCP server (mcp.rs)
 crates/cli/templates   lesson templates served by the lesson_format tool
-.claude/commands   slash commands for Claude Code (/ask, /lesson)
+.claude/commands   slash commands for Claude Code (/ask, /lesson, /review, /apologia, /study)
 ```
 
 Run the tests with `cargo test`.

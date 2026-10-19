@@ -583,12 +583,14 @@ fn initialize(params: &Value) -> Value {
 
 const CHAPTER_FORMAT: &str = include_str!("../templates/chapter.md");
 const SYNTHESIS_FORMAT: &str = include_str!("../templates/synthesis.md");
+const SECTION_STUDY_FORMAT: &str = include_str!("../templates/section_study.md");
 
 fn lesson_format(args: &Value) -> Result<String> {
     match args.get("kind").and_then(Value::as_str).unwrap_or("") {
         "chapter" => Ok(CHAPTER_FORMAT.to_string()),
         "synthesis" | "topic" => Ok(SYNTHESIS_FORMAT.to_string()),
-        k => Err(anyhow!("unknown lesson kind \"{k}\"; use chapter or synthesis")),
+        "section-study" | "section_study" | "study" => Ok(SECTION_STUDY_FORMAT.to_string()),
+        k => Err(anyhow!("unknown lesson kind \"{k}\"; use chapter, synthesis or section-study")),
     }
 }
 
@@ -673,11 +675,11 @@ fn tool_list() -> Value {
         {
             "name": "lesson_format",
             "description": "The user's lesson template and rules. kind: chapter (one chapter, video or talk, \
-                two-tier Text Analysis) or synthesis (an integrated lesson on a topic or across several notes). \
-                Read it before writing a lesson.",
+                two-tier Text Analysis), synthesis (an integrated lesson on a topic or across several notes) or \
+                section-study (a numbered argument walkthrough of a block of a primary text). Read it before writing one.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "kind": { "type": "string", "enum": ["chapter", "synthesis"] } },
+                "properties": { "kind": { "type": "string", "enum": ["chapter", "synthesis", "section-study"] } },
                 "required": ["kind"]
             }
         },
