@@ -47,11 +47,12 @@ Think of it as a **library with a librarian and a tutor**.
   teach from what the librarian hands it, and always to cite the shelf
   it came from.
 
-```
-  Obsidian vault  ──dsk index──▶  index.db  ◀──dsk mcp──  Claude Code
-  (your notes)                    (cache)                  /ask /lesson /review /apologia /study
-       ▲                                                        │
-       └──────── new lessons, Practice_Log, recall dates ───────┘
+```mermaid
+flowchart LR
+    V[("Obsidian vault<br/>your notes")] -- "dsk index<br/>splits notes at headings" --> DB[("index.db<br/>keywords, meaning, links")]
+    DB -- "dsk mcp<br/>search, read, follow links" --> C["Claude Code<br/>/ask /lesson /review<br/>/apologia /study"]
+    C -. "new lessons, Practice_Log,<br/>recall dates" .-> V
+    DB -- "dsk search, dsk due" --> T["Terminal"]
 ```
 
 Everything runs on your machine. Claude Code uses your normal Claude
@@ -193,6 +194,18 @@ the old version is copied to `.didaskalos/backups/` in the vault first.
 /review theosis      # one note right now, due or not
 ```
 
+```mermaid
+flowchart TD
+    A["/review lists what is due<br/>most overdue first"] --> B["Next note"]
+    B --> Q["One question<br/>(4 to 6 per note)"]
+    Q --> R["You answer, or say skip"]
+    R --> F["What you got, what you missed,<br/>the note's wording and link"]
+    F -- "more questions" --> Q
+    F -- "note finished" --> G{"Grade<br/>again, hard, good, easy"}
+    G --> W["Next date written to<br/>the note's frontmatter"]
+    W -- "more due" --> B
+```
+
 1. It lists what is due (most overdue first). If nothing is due, it
    offers lessons you have never reviewed.
 2. For each note it asks **4 to 6 questions, one at a time**, built from
@@ -233,6 +246,15 @@ Nothing else in the note changes.
 - each `Q1: "…"` item under a Q&A or objections heading.
 
 **A round:**
+
+```mermaid
+flowchart LR
+    O["An objector<br/>makes the case"] --> A["You answer<br/>typed or spoken"]
+    A --> P["1 or 2 pushbacks<br/>in character"]
+    P --> S["Score out of 24<br/>checked against your note"]
+    S --> K["Critique, stronger reply,<br/>vault gaps"]
+    K --> L["Attempt saved to Practice_Log/<br/>card gets its next date"]
+```
 
 1. **The objection.** A realistic objector, such as a Reformed Baptist, a
    Catholic apologist, a Hebrew Roots teacher or a skeptic, states it in
@@ -298,6 +320,18 @@ afterwards.
 The point is to **rebuild the author's argument yourself**, not to read
 a summary.
 
+
+```mermaid
+flowchart TD
+    P["1. Core Problem<br/>predict the first move"] --> S["2. Connector question"]
+    S --> Y["You answer"]
+    Y --> R["Step shown with its section and quotes<br/>got it, partly, missed"]
+    R -- "next step" --> S
+    R -- "chain finished" --> B["Say the whole chain back"]
+    B --> H["3. Does it hold up?<br/>strongest step, weakest step, verdict"]
+    H --> Q["4. Review Questions"]
+    Q --> D["5. Grade sets the recall dates"]
+```
 1. **The Core Problem.** What the last block left open, and the question
    this one answers. Then: what do you expect the first move to be?
 2. **The chain, one step at a time.** It asks each step's connector
@@ -342,6 +376,17 @@ fixes) and meaning matches, merges the two lists, then favours your Wiki
 concept pages and lessons over raw transcripts and boosts notes your own
 links tie to the top results. Practice logs rank lowest, with the raw
 material, because they hold your own answers, right or wrong.
+
+```mermaid
+flowchart LR
+    Q["Your query"] --> K["Keyword match<br/>with spelling fixes"]
+    Q --> M["Meaning match<br/>embeddings"]
+    K --> X["Merge the two lists"]
+    M --> X
+    X --> L["Favour Wiki pages and lessons<br/>over raw material and practice logs"]
+    L --> N["Boost notes your links<br/>tie to the top results"]
+    N --> O["Ranked notes with<br/>their matching sections"]
+```
 
 ---
 
